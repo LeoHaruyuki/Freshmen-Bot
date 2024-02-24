@@ -44,6 +44,10 @@ day INTEGER,
 voice_seconds INTEGER,
 messages INTEGER
 );""")
+c.execute("""CREATE TABLE IF NOT EXISTS member_count (
+time INTEGER,
+members INTEGER
+);""")
 conn.commit()
 
 # Instantiate the daily counts to be in order with database
@@ -84,6 +88,17 @@ def sigint_handler(sig, frame):
     print("Closed sqlite")
     sys.exit(0)
 
+# I lost motivation while writing this
+def update_table(conn, table, columns, values, condition):
+    # "update_table(conn, 'count', ['messages', 'voice_seconds'], [1, 20], 'id = id'"
+    upd = ", ".join([f"{col} = ?" for col in columns])
+    sql = f"UPDATE {table} SET {upd} WHERE {condition}"
+    try:
+        conn.execute(sql, values)
+        conn.commit()
+    except sqlite3.Error as e:
+        print("Error updating table:", e)
+        
 
 
 
@@ -134,7 +149,7 @@ async def on_message(message):
         # If user message count is 250, assign active user role (Using == instead of >= avoids pointless assigning)
         if count+1 == 250:
             await message.author.add_roles(role)
-            print("Gave " + message.author.global_name + " Active Member role")
+            print("Gave " + message.author.display_name + " Active Member role")
             embed = discord.Embed(title="Role Assigned", color=0xffffff, description="Active Member role was assigned to " + message.author.global_name + " for reaching 250 messages")
             await log_channel.send(embed=embed)
     await client.process_commands(message)
@@ -158,6 +173,8 @@ async def on_member_join(member):
     # Bot is also in my server, this avoids counting that
     if member.guild.id == 1190760871719338044:
         member_count = member.guild.member_count
+        c.execute("INSERT INTO member_count (time, members) VALUES (?, ?)", (int(time.strftime('%Y%m%d%H%M%S', time.localtime())), member_count,))
+        conn.commit()
         await client.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=str(member_count) + " Members' Every Move"))
         # TODO: Store this in a file rather than a discord channel
         await client.get_channel(1209592495890108456).send(str(member_count))
@@ -168,6 +185,8 @@ async def on_member_leave(member):
     # Same notes as 10 lines above
     if member.guild.id == 1190760871719338044:
         member_count = member.guild.member_count
+        c.execute("INSERT INTO member_count (time, members) VALUES (?, ?)", (int(time.strftime('%Y%m%d%H%M%S', time.localtime())), member_count,))
+        conn.commit()
         await client.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=str(member_count) + " Members' Every Move"))
         await client.get_channel(1209592495890108456).send(str(member_count))
 
@@ -256,10 +275,10 @@ async def on_shutdown():
 async def stats(ctx, user: discord.User, stat: discord.Option(str, choices=["Messages", "VC Seconds"])):
     if stat.lower() == "messages":
         c.execute('SELECT messages FROM count WHERE id = ?', (user.id,))
-        await ctx.send(user.display_name + " has " + str(c.fetchone()[0]) + " messages in this server")
+        await ctx.respond(user.display_name + " has " + str(c.fetchone()[0]) + " messages in this server", ephemeral=True)
     else:
         c.execute('SELECT voice_seconds FROM count WHERE id = ?', (user.id,))
-        await ctx.send(user.display_name + " has " + str(c.fetchone()[0]) + " seconds in voice call")
+        await ctx.respond(user.display_name + " has " + str(c.fetchone()[0]) + " seconds in voice call", ephemeral=True)
                 
 
 if __name__ == '__main__':
