@@ -95,7 +95,8 @@ async def on_ready():
     log_channel = client.get_channel(1191391556033335306)
     role = client.get_guild(1190760871719338044).get_role(1209635586609250324)
     await client.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=str(client.get_guild(1190760871719338044).member_count) + " Members' Every Move"))
-    spreadsheet_loop.start()
+    if not spreadsheet_loop.is_running():
+        spreadsheet_loop.start()
 
 
 @client.event
@@ -241,6 +242,15 @@ async def spreadsheet_loop():
             except:
                 await bot_channel.send("# Too long to send")
 
+# Catch all for shutdown, since pycord has horrible shutdown handling, and ubuntu doesn't want to catch sigint specifically for this file
+@spreadsheet_loop.after_loop
+async def on_shutdown():
+    global voice_dict, last_row
+    print('Force shutdown detected, cleaning up')
+    save("variables", "voice_dict", "last_row")
+    print("Saved variables")
+    conn.close()
+    print("Closed sqlite")
 
 @client.slash_command(name="stats")
 async def stats(ctx, user: discord.User, stat: discord.Option(str, choices=["Messages", "VC Seconds"])):
@@ -252,14 +262,6 @@ async def stats(ctx, user: discord.User, stat: discord.Option(str, choices=["Mes
         await ctx.send(user.display_name + " has " + str(c.fetchone()[0]) + " seconds in voice call")
                 
 
-async def mod_run():
-    await client.start(os.getenv('TOKEN'))
-
 if __name__ == '__main__':
-    # I'm having a mental breakdown, why doesn't client.run and ubuntu like me
-    signal.signal(signal.SIGINT, sigint_handler)
-    try:
-        asyncio.run(mod_run())
-    except KeyboardInterrupt:
-        sigint_handler(0,0)
+    client.run(os.getenv('TOKEN'))
 
