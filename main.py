@@ -14,17 +14,20 @@ import os
 import sys
 import sqlite3
 
+ACTIVE_MEMBER_MESSAGES = 100
+
 load_dotenv()
 client = commands.Bot(command_prefix="y|", intents=discord.Intents.all())
 
 conn = sqlite3.connect('RIT.db')
 c = conn.cursor()
 c.execute("""CREATE TABLE IF NOT EXISTS user_stats(
-          id TEXT PRIMARY KEY,
+          id TEXT,
           date TEXT,
           message_count INTEGER,
           voice_duration INTEGER,
-          voice_start TEXT
+          voice_start TEXT,
+          PRIMARY KEY (id, date)
 );""")
 # Ease of access, not technically needed
 c.execute("""CREATE TABLE IF NOT EXISTS server_stats(
@@ -33,7 +36,7 @@ c.execute("""CREATE TABLE IF NOT EXISTS server_stats(
           voice_duration INTEGER
 );""")
 c.execute("""CREATE TABLE IF NOT EXISTS members(
-          member_count INTEGER PRIMARY KEY,
+          member_count INTEGER,
           time TEXT
 );""")
 conn.commit()
@@ -44,9 +47,6 @@ sh = gc.open("Brick City Bound Management (Responses)")
 sheet = sh.get_worksheet(0)
 titles = sheet.row_values(1)
 last_row = 9
-
-create_user = lambda id: c.execute("INSERT OR IGNORE INTO user_stats (id, date, message_count, voice_duration) VALUES (?, ?, 0, 0)", (str(id), str(datetime.date.today()),))
-create_server_entry = lambda: c.execute("INSERT OR IGNORE INTO server_stats (date, message_count, voice_duration) VALUES (?, 0, 0)", (str(datetime.date.today()),))
 
 def before_shutdown():
     print("Shutdown requested")
@@ -76,30 +76,26 @@ async def on_message(message):
     # We HATE bots
     if message.author.bot:
         return
-    create_user(message.author.id)
-    create_server_entry()
-    c.execute("UPDATE user_stats SET message_count = message_count + 1 WHERE id = ? AND date = ?", (str(message.author.id), str(datetime.date.today()),))
-    c.execute("UPDATE server_stats SET message_count = message_count + 1 WHERE date = ?", (str(datetime.date.today()),))
+    c.execute("INSERT INTO user_stats (id, date, message_count, voice_duration) VALUES (?, ?, ?, ?) ON CONFLICT (id, date) DO UPDATE SET message_count = message_count + 1", (str(message.author.id), str(datetime.date.today()), 1, 0,))
+    c.execute("INSERT INTO server_stats (date, message_count, voice_duration) VALUES (?, ?, ?) ON CONFLICT (date) DO UPDATE SET message_count = message_count + 1", (str(datetime.date.today()), 1, 0,))
     conn.commit()
     
     c.execute("SELECT SUM(message_count) FROM user_stats WHERE id = ?", (str(message.author.id),))
     result = c.fetchone()
     if result and result[0]:
-        if result[0] == 250:
+        if result[0] == ACTIVE_MEMBER_MESSAGES:
             await message.author.add_roles(role)
             print("Gave " + message.author.display_name + " Active Member role")
-            embed = discord.Embed(title="Role Assigned", color=0xffffff, description="Active Member role was assigned to " + message.author.global_name + " for reaching 250 messages")
+            embed = discord.Embed(title="Role Assigned", color=0xffffff, description="Active Member role was assigned to " + message.author.display_name + " for reaching " + str(ACTIVE_MEMBER_MESSAGES) + " messages")
             await log_channel.send(embed=embed)
     await client.process_commands(message)
 
 @client.event
 async def on_voice_state_update(member, before, after):
-    # Catch in case it is the first event that day
-    create_server_entry()
     # Member joined a channel (Did not move channels)
     if not before.channel and after.channel:
-        create_user(member.id)
-        c.execute("UPDATE user_stats SET voice_start = ? WHERE id = ? and date = ?", (datetime.datetime.now(), str(member.id), str(datetime.date.today()),))
+        c.execute("INSERT INTO user_stats (id, date, message_count, voice_duration, voice_start) VALUES (?, ?, ?, ?, ?) ON CONFLICT (id, date) DO UPDATE SET voice_start = ?", 
+                  (str(member.id), str(datetime.date.today()), 0, 0, datetime.datetime.now(), datetime.datetime.now(),))
         conn.commit()
     # Member left a join channel (Did not move channels)
     if before.channel and not after.channel:
@@ -108,7 +104,7 @@ async def on_voice_state_update(member, before, after):
         if result and result[0]:
             voice_duration = int((datetime.datetime.now() - datetime.datetime.fromisoformat(result[0])).total_seconds())
             c.execute("UPDATE user_stats SET voice_duration = voice_duration + ? WHERE id = ? AND date = ?", (voice_duration, str(member.id), str(datetime.date.today()),))
-            c.execute("UPDATE server_stats SET voice_duration = voice_duration + ? WHERE date = ?", (voice_duration, str(datetime.date.today()),))
+            c.execute("INSERT INTO server_stats (date, message_count, voice_duration) VALUES (?, ?, ?) ON CONFLICT (date) DO UPDATE SET voice_duration = voice_duration + ?", (str(datetime.date.today()), 0, voice_duration, voice_duration))
             conn.commit()
 
 
@@ -128,6 +124,84 @@ async def restart(ctx):
     os.execv(sys.executable, ['python3'] + sys.argv)
 
 @client.slash_command()
+@commands.is_owner()
+async def force_update(ctx, datestr: str):
+    global role, log_channel
+    interaction = await ctx.respond("Force updating database for date " + datestr, ephemeral=True)
+    async def update(datestr):    
+        print("Force updating database for date " + datestr)
+        channel_count, failed_count = 0, 0
+        date = datetime.date(int(datestr[0:4]), int(datestr[5:7]), int(datestr[8:10]))
+        messages = []
+        for channel in ctx.guild.channels:
+            if type(channel) == discord.TextChannel:
+                channel_count += 1
+                last_message = datetime.datetime(date.year, date.month, date.day) + datetime.timedelta(days=1)
+                while True:
+                    temp = datetime.datetime(date.year, date.month, date.day) - datetime.timedelta(days=1)
+                    try:
+                        h = await channel.history(limit=200, before=last_message, after=temp).flatten()
+                        try:
+                            last_message = h[0].created_at
+                            messages += h
+                        except IndexError as e:
+                            break
+                    except discord.errors.Forbidden:
+                        failed_count += 1
+                        break
+        print("Found " + str(len(messages)) + " messages sent on " + datestr + ". Searched " + str(channel_count-failed_count) + " channels, and couldn't access " + str(failed_count) + " more channels.")
+        for message in messages:
+            c.execute("INSERT INTO user_stats (id, date, message_count, voice_duration) VALUES (?, ?, ?, ?) ON CONFLICT (id, date) DO UPDATE SET message_count = message_count + 1", (str(message.author.id), str(date), 1, 0,))
+            c.execute("INSERT INTO server_stats (date, message_count, voice_duration) VALUES (?, ?, ?) ON CONFLICT (date) DO UPDATE SET message_count = message_count + 1", (str(date), 1, 0,))
+            conn.commit()
+            c.execute("SELECT SUM(message_count) FROM user_stats WHERE id = ?", (str(message.author.id),))
+            result = c.fetchone()
+            if result and result[0]:
+                try:
+                    if result[0] == ACTIVE_MEMBER_MESSAGES:
+                        member = client.get_guild(1190760871719338044).get_member(message.author.id)
+                        await member.add_roles(role)
+                        print("Gave " + member.display_name + " Active Member role")
+                        embed = discord.Embed(title="Role Assigned", color=0xffffff, description="Active Member role was assigned to " + member.display_name + " for reaching " + ACTIVE_MEMBER_MESSAGES + " messages")
+                        await log_channel.send(embed=embed)
+                except Exception as e:
+                    print(e)
+                    print(message.author.name)
+    # Every single day since server open, for when you have to hard recount database, could take hours
+    if datestr == "all":
+        delta = datetime.date.today() - datetime.date(2023, 12, 31)
+        for i in range(delta.days + 1):
+            date = datetime.date(2023, 12, 31) + datetime.timedelta(days=i)
+            await update(date.strftime("%Y-%m-%d"))
+    else:
+        await update(datestr)
+
+@client.slash_command()
+@commands.is_owner()
+async def update_active_role(ctx):
+    global role
+    await ctx.respond("Updating Active Member Role", ephemeral=True)
+    users = {}
+    guild = client.get_guild(1190760871719338044)
+    for member in guild.members:
+        c.execute("SELECT SUM(message_count) FROM user_stats WHERE id = ?", (member.id,))
+        message_count = c.fetchone()
+        if message_count and message_count[0]:
+            if message_count[0] >= ACTIVE_MEMBER_MESSAGES:
+                if role in member.roles:
+                    pass
+                else:
+                    await member.add_roles(role)
+                    print("Gave " + member.display_name + " Active Member role")
+                    embed = discord.Embed(title="Role Assigned", color=0xffffff, description="Active Member role was assigned to " + member.display_name + " for reaching " + str(ACTIVE_MEMBER_MESSAGES) + " messages")
+                    await log_channel.send(embed=embed)
+            if message_count[0] < ACTIVE_MEMBER_MESSAGES:
+                if role in member.roles:
+                    member.remove_roles(role)
+                    print("Removed Active Role from " + member.display_name)
+    print("Done!")
+
+@client.slash_command()
 async def stats(ctx, date: Option(str, "Date in YYYY-MM-DD Format", required = False, default = "Total"), user: discord.User = None): # type: ignore
     embed = discord.Embed(title="Requested Stats", color=0x00ff00)
     if user:
@@ -138,7 +212,6 @@ async def stats(ctx, date: Option(str, "Date in YYYY-MM-DD Format", required = F
                 date = datetime.date(int(date[0:4]), int(date[5:7]), int(date[8:10]))
                 c.execute("SELECT message_count, voice_duration FROM user_stats WHERE id = ? AND date = ?", (str(user.id), str(date),))
             except ValueError as e:
-                print(e)
                 await ctx.respond("Date should look like YYYY-MM-DD, 2024-02-26", ephemeral=True)
                 return
     else:
@@ -149,7 +222,6 @@ async def stats(ctx, date: Option(str, "Date in YYYY-MM-DD Format", required = F
                 date = datetime.date(int(date[0:4]), int(date[5:7]), int(date[8:10]))
                 c.execute("SELECT message_count, voice_duration FROM server_stats WHERE date = ?", (str(date),))
             except ValueError as e:
-                print(e)
                 await ctx.respond("Date should look like YYYY-MM-DD, 2024-02-26", ephemeral=True)
                 return
     result = c.fetchone()
