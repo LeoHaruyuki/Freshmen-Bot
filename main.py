@@ -102,7 +102,16 @@ async def on_voice_state_update(member, before, after):
         c.execute("SELECT voice_start FROM user_stats WHERE id = ? AND date = ?", (str(member.id), str(datetime.date.today()),))
         result = c.fetchone()
         if result and result[0]:
-            voice_duration = int((datetime.datetime.now() - datetime.datetime.fromisoformat(result[0])).total_seconds())
+            start = datetime.datetime.fromisoformat(result[0])
+            end = datetime.datetime.now()
+            while start.date() != end.date():
+                end_of_day = datetime.datetime(start.year, start.month, start.day, 23, 59, 59)
+                voice_duration = int((end_of_day-start).total_seconds())+1
+                c.execute("UPDATE user_stats SET voice_duration = voice_duration + ? WHERE id = ? AND date = ?", (voice_duration, str(member.id), str(start.date()),))
+                c.execute("INSERT INTO server_stats (date, message_count, voice_duration) VALUES (?, ?, ?) ON CONFLICT (date) DO UPDATE SET voice_duration = voice_duration + ?", (str(start.date()), 0, voice_duration, voice_duration))
+                conn.commit()
+                start = end_of_day + datetime.timedelta(seconds=1)
+            voice_duration = int((end - start).total_seconds())
             c.execute("UPDATE user_stats SET voice_duration = voice_duration + ? WHERE id = ? AND date = ?", (voice_duration, str(member.id), str(datetime.date.today()),))
             c.execute("INSERT INTO server_stats (date, message_count, voice_duration) VALUES (?, ?, ?) ON CONFLICT (date) DO UPDATE SET voice_duration = voice_duration + ?", (str(datetime.date.today()), 0, voice_duration, voice_duration))
             conn.commit()
